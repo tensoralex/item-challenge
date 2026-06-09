@@ -339,6 +339,38 @@ describe('HTTP server e2e', () => {
     expect(json.error).toBe('Invalid If-Match header');
   });
 
+  for (const ifMatchRaw of ['1e2', '1.0', '+1'] as const) {
+    it(`PUT /api/items/:id returns 400 for non-integer If-Match ${ifMatchRaw}`, async (ctx) => {
+      if (skip) ctx.skip();
+
+      const created = await api(baseUrl, 'POST', '/api/items', {
+        body: validCreate(`${subject}-ifmatch-${ifMatchRaw}`),
+      });
+      const id = created.json.id as string;
+
+      const { status, json } = await api(baseUrl, 'PUT', `/api/items/${id}`, {
+        body: { difficulty: 4 },
+        ifMatchRaw,
+      });
+
+      expect(status).toBe(400);
+      expect(json.error).toBe('Invalid If-Match header');
+    });
+  }
+
+  it('GET /api/items returns 400 for malformed list cursor', async (ctx) => {
+    if (skip) ctx.skip();
+
+    const { status, json } = await api(
+      baseUrl,
+      'GET',
+      `/api/items?subject=${encodeURIComponent(subject)}&cursor=not-a-valid-cursor`,
+    );
+
+    expect(status).toBe(400);
+    expect(json.error).toBe('Invalid cursor');
+  });
+
   it('PUT /api/items/:id returns 400 for empty update body', async (ctx) => {
     if (skip) ctx.skip();
 

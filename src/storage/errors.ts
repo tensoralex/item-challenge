@@ -9,3 +9,11 @@ export class OptimisticLockError extends Error {
     this.name = 'OptimisticLockError';
   }
 }
+
+/** Thrown when a list pagination cursor is malformed or fails shape validation. */
+export class InvalidCursorError extends Error {
+  constructor() {
+    super('Invalid cursor');
+    this.name = 'InvalidCursorError';
+  }
+}

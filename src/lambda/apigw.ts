@@ -30,12 +30,14 @@ export type IfMatchResult =
  * Parse If-Match header for optimistic locking.
  * Invalid values (non-integer or < 1) must be rejected — not silently ignored.
  */
+/** Strict positive-integer version token — rejects scientific notation, decimals, signs. */
+const IF_MATCH_VERSION_RE = /^[1-9]\d*$/;
+
 export function parseIfMatch(event: APIGatewayProxyEventV2): IfMatchResult {
   const raw = event.headers?.['if-match'] ?? event.headers?.['If-Match'];
   if (!raw) return { kind: 'absent' };
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < 1) return { kind: 'invalid' };
-  return { kind: 'valid', version: n };
+  if (!IF_MATCH_VERSION_RE.test(raw)) return { kind: 'invalid' };
+  return { kind: 'valid', version: Number(raw) };
 }
 
 export function parseJson(

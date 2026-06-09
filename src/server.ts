@@ -38,12 +38,14 @@ const MAX_BODY_BYTES = 1_048_576;
 
 type IfMatchParse = { kind: 'absent' } | { kind: 'valid'; version: number } | { kind: 'invalid' };
 
+/** Strict positive-integer version token — rejects scientific notation, decimals, signs. */
+const IF_MATCH_VERSION_RE = /^[1-9]\d*$/;
+
 function parseIfMatchVersion(req: IncomingMessage): IfMatchParse {
   const raw = req.headers['if-match'];
   if (!raw || Array.isArray(raw)) return { kind: 'absent' };
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < 1) return { kind: 'invalid' };
-  return { kind: 'valid', version: n };
+  if (!IF_MATCH_VERSION_RE.test(raw)) return { kind: 'invalid' };
+  return { kind: 'valid', version: Number(raw) };
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse) {

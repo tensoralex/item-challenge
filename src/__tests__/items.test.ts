@@ -12,6 +12,9 @@ import {
   listItemsHandler,
 } from '../handlers/items.js';
 import { ABSENT_ITEM_ID } from '../validation/schemas.js';
+import { decodeDynamoCursor } from '../lib/cursor.js';
+import { InvalidCursorError } from '../storage/errors.js';
+import { toErrorResponse } from '../handlers/http.js';
 
 const validCreate = {
   subject: 'AP Biology',
@@ -126,6 +129,25 @@ describe('Item handlers', () => {
       if ('items' in result.body && Array.isArray(result.body.items)) {
         expect(result.body.items.length).toBeGreaterThanOrEqual(1);
       }
+    });
+  });
+
+  describe('list cursor validation (DynamoDB path)', () => {
+    it('rejects garbage base64/JSON cursors', () => {
+      expect(() => decodeDynamoCursor('not-valid-cursor')).toThrow(InvalidCursorError);
+    });
+
+    it('rejects forged cursor keys outside GSI1 LastEvaluatedKey shape', () => {
+      const forged = Buffer.from(JSON.stringify({ PK: 'x', SK: 'y', evil: 'z' })).toString(
+        'base64url',
+      );
+      expect(() => decodeDynamoCursor(forged)).toThrow(InvalidCursorError);
+    });
+
+    it('maps InvalidCursorError to 400 via toErrorResponse', () => {
+      const result = toErrorResponse(new InvalidCursorError());
+      expect(result.statusCode).toBe(400);
+      expect(result.body).toEqual({ error: 'Invalid cursor' });
     });
   });
 

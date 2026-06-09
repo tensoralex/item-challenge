@@ -22,13 +22,28 @@ My design record for the exam item management API — data model, access pattern
 | `GET /api/items` | Implemented (minimal) | Subject-required GSI1 query; status filter; capped limit; opaque cursor; summaries omit `content` |
 | `POST /api/items/:id/versions` | Implemented (minimal) | Checkpoint without content change; transactional version bump + audit snapshot |
 
-**Error model:** `400` validation (including malformed `If-Match`, empty update body, missing/invalid item id, list without `subject`), `404` not found, `409` optimistic lock conflict (`If-Match` / stale version), `413` request body too large (local server), `500` unexpected.
+**Error model:** `400` validation (including malformed `If-Match`, invalid list `cursor`, empty update body, missing/invalid item id, list without `subject`), `404` not found, `409` optimistic lock conflict (`If-Match` / stale version), `413` request body too large (local server), `500` unexpected.
 
 **Lambda readiness:** Handlers are stateless, env-configured, and free of HTTP types — API Gateway would map events to handler calls and serialize responses.
 
 **HTTP e2e harness:** `pnpm test:e2e` boots the real server on an ephemeral port and exercises all six routes via `fetch()` against DynamoDB Local (skips when down).
 
-**Phased delivery:** I shipped correctness primitives (transactions, optimistic locking, audit invariants) first; list and checkpoint endpoints followed on the proven storage layer. I deferred unfiltered listing and multi-filter queries rather than shipping partial auth or broken indexes.
+### Implementation depth — hardened core vs deliberately minimal
+
+I treated the exercise as a correctness-first storage problem, then layered HTTP endpoints on top.
+
+| Tier | Scope | Rationale |
+|------|-------|-----------|
+| **Tier 1 — fully hardened** | Create, get, update, audit + storage primitives (transactions, optimistic locking, audit invariants, complete audit pagination) | These encode the guarantees everything else builds on. Getting these wrong corrupts data, so they received the most design and testing attention. |
+| **Tier 2 — deliberately minimal** | List and version-checkpoint | End-to-end proof of the single-table design under real access patterns; intentionally not extended — see below. |
+
+Why Tier 2 stops where it does:
+
+- The list endpoint exercises the real access patterns (GSI1 `INCLUDE` projection, opaque cursor pagination); the checkpoint endpoint exercises the transactional version bump.
+- Extending either depends on unknowns: which UI query patterns dominate (this drives GSI shape, and changing an `INCLUDE` projection recreates the index), and what workflow rules govern checkpoints (who may promote, and when).
+- A wrong guess on an index is expensive to undo; the hardened CRUD core carries no such uncertainty, so that is where the effort went first.
+
+The core CRUD path was built within the exercise's time guidance. The documentation, local tooling, and CDK layer were a deliberate additional investment beyond the brief — they make the solution reviewable and reproducible, but I don't count them as required scope.
 
 ## Data model — single-table design
 
@@ -42,6 +57,7 @@ I chose one table `ExamItems` with composite primary key and one GSI.
 - **Version sort keys** use 6-digit zero-padding (`VERSION#000010` after `VERSION#000009`) for correct lexicographic ordering.
 - **Top-level `version`** duplicates `metadata.version` on METADATA rows for optimistic-lock `ConditionExpression`.
 - **GSI attributes** exist only on METADATA rows so list-by-subject does not return version snapshots.
+- **`created` in GSI1SK** is epoch milliseconds (`Date.now()`), not ISO-8601 — `GSI1SK = <status>#<created>` sorts correctly as a string when `created` is fixed-width numeric.
 
 ### Example: one item's rows
 
@@ -49,7 +65,7 @@ Concrete rows for one item after create, a `PUT` update, and a checkpoint (`POST
 
 | PK | SK | GSI1PK | GSI1SK | version | Row meaning |
 |----|----|--------|--------|---------|-------------|
-| `ITEM#a1b2c3` | `METADATA` | `SUBJECT#AP Biology` | `review#2026-06-01T10:00:00Z` | 3 | Current item (only row in GSI1) |
+| `ITEM#a1b2c3` | `METADATA` | `SUBJECT#AP Biology` | `review#1769900000000` | 3 | Current item (only row in GSI1) |
 | `ITEM#a1b2c3` | `VERSION#000001` | — | — | 1 | Snapshot after create |
 | `ITEM#a1b2c3` | `VERSION#000002` | — | — | 2 | Snapshot after PUT update |
 | `ITEM#a1b2c3` | `VERSION#000003` | — | — | 3 | Snapshot after checkpoint |
@@ -71,7 +87,7 @@ Concrete rows for one item after create, a `PUT` update, and a checkpoint (`POST
 
 ### List items: minimal implementation
 
-**What I shipped:** `GET /api/items?subject=<required>&status=&limit=&cursor=` — GSI1 query on `SUBJECT#<subject>`, optional `begins_with` on `GSI1SK` for status, capped `limit` (max 50), opaque base64url cursor from `LastEvaluatedKey`. Responses return **summaries** (no `content`) — GSI1 uses `INCLUDE` projection for read cost and so list views never expose answers.
+**What I shipped:** `GET /api/items?subject=<required>&status=&limit=&cursor=` — GSI1 query on `SUBJECT#<subject>`, optional `begins_with` on `GSI1SK` for status, capped `limit` (max 50), opaque base64url cursor from `LastEvaluatedKey`. Responses return **summaries** (no `content`) — GSI1 uses `INCLUDE` projection to reduce read cost and to ensure list views never expose answers.
 
 **Caveat:** DynamoDB applies `Limit` before `FilterExpression`; status-filtered pages may return fewer than `limit` items.
 
@@ -99,10 +115,11 @@ Concrete rows for one item after create, a `PUT` update, and a checkpoint (`POST
 
 Immutable version rows **are** the audit trail (`GET /api/items/:id/audit` queries them).
 
-**Optimistic locking (my value-add):** The exercise does not require concurrency control. I added it because exam items move through a multi-author review workflow (`draft` → `review` → `approved`). Without it, concurrent edits can silently overwrite each other and corrupt the audit trail. Updates use `ConditionExpression: version = :expected` on METADATA; mismatches raise `OptimisticLockError`.
+**Optimistic locking (beyond the spec):** The exercise does not require concurrency control. I added it because exam items move through a multi-author review workflow (`draft` → `review` → `approved`). Without it, concurrent edits can silently overwrite each other and corrupt the audit trail. Updates use `ConditionExpression: version = :expected` on METADATA; mismatches raise `OptimisticLockError`.
 
 - **Storage API:** `updateItem(id, data, expectedVersion?)` — when `expectedVersion` is supplied, the condition uses that value instead of the freshly read version.
-- **HTTP:** `PUT` accepts optional `If-Match: <version>` header (positive integer); malformed values return `400`; valid values map to `expectedVersion`; conflicts return `409`.
+- **HTTP:** `PUT` accepts optional `If-Match: <version>` header carrying a **bare positive integer** (not an RFC 7232 quoted ETag). Only digit strings matching `/^[1-9]\d*$/` are accepted — scientific notation (`1e2`), decimals (`1.0`), and signs (`+1`) return `400`. Valid values map to `expectedVersion`; version conflicts return **`409`** (application conflict) rather than **`412`** — a deliberate simplification for this API.
+- **TransactWrite cancellation:** only `CancellationReasons` with `Code === 'ConditionalCheckFailed'` map to `OptimisticLockError`; throttling or other transaction cancels propagate as retryable/unexpected errors (not mis-reported as version conflicts).
 
 ```mermaid
 sequenceDiagram

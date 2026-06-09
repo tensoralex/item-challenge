@@ -25,6 +25,20 @@ import { decodeDynamoCursor, encodeDynamoCursor } from '../lib/cursor.js';
 import { toExamItem, toItemRecord, toItemSummary } from '../lib/mappers.js';
 import { OptimisticLockError } from './errors.js';
 
+/** True when a TransactWriteItems cancel was caused by a version conditional check failure. */
+function isOptimisticLockCancellation(err: unknown): boolean {
+  if (
+    !err ||
+    typeof err !== 'object' ||
+    (err as { name?: string }).name !== 'TransactionCanceledException'
+  ) {
+    return false;
+  }
+  const reasons = (err as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons;
+  if (!Array.isArray(reasons)) return false;
+  return reasons.some((reason) => reason.Code === 'ConditionalCheckFailed');
+}
+
 export { OptimisticLockError };
 
 export class DynamoDBStorage implements ItemStorage {
@@ -154,12 +168,7 @@ export class DynamoDBStorage implements ItemStorage {
         }),
       );
     } catch (err: unknown) {
-      if (
-        err &&
-        typeof err === 'object' &&
-        'name' in err &&
-        (err as { name: string }).name === 'TransactionCanceledException'
-      ) {
+      if (isOptimisticLockCancellation(err)) {
         throw new OptimisticLockError(id);
       }
       throw err;
@@ -268,12 +277,7 @@ export class DynamoDBStorage implements ItemStorage {
         }),
       );
     } catch (err: unknown) {
-      if (
-        err &&
-        typeof err === 'object' &&
-        'name' in err &&
-        (err as { name: string }).name === 'TransactionCanceledException'
-      ) {
+      if (isOptimisticLockCancellation(err)) {
         throw new OptimisticLockError(id);
       }
       throw err;
@@ -283,18 +287,31 @@ export class DynamoDBStorage implements ItemStorage {
   }
 
   async getAuditTrail(id: string): Promise<ExamItem[]> {
-    const result = await this.client.send(
-      new QueryCommand({
-        TableName: this.tableName,
-        KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)',
-        ExpressionAttributeValues: {
-          ':pk': itemPk(id),
-          ':prefix': VERSION_PREFIX,
-        },
-        ScanIndexForward: true,
-      }),
-    );
+    const versions: ExamItem[] = [];
+    let exclusiveStartKey: Record<string, unknown> | undefined;
 
-    return (result.Items || []).map((row) => toExamItem(row as Record<string, unknown>));
+    // Audit must return complete version history — paginate until LastEvaluatedKey is exhausted
+    // (a single Query response is capped at 1 MB).
+    do {
+      const result = await this.client.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)',
+          ExpressionAttributeValues: {
+            ':pk': itemPk(id),
+            ':prefix': VERSION_PREFIX,
+          },
+          ScanIndexForward: true,
+          ...(exclusiveStartKey && { ExclusiveStartKey: exclusiveStartKey }),
+        }),
+      );
+
+      for (const row of result.Items ?? []) {
+        versions.push(toExamItem(row as Record<string, unknown>));
+      }
+      exclusiveStartKey = result.LastEvaluatedKey as Record<string, unknown> | undefined;
+    } while (exclusiveStartKey);
+
+    return versions;
   }
 }

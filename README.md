@@ -77,7 +77,11 @@ The 12-step script demonstrates: create → read → optimistic-lock update → 
 
 The exercise suggests focusing on 2–3 endpoints done well. I chose to implement all six because the storage primitives (transactions, optimistic locking, audit invariants) were the hard part — once those were solid, list and version-checkpoint endpoints were thin handler additions on the same layer.
 
-I shipped correctness first (create, read, update, audit), then list and checkpoint on the proven storage layer. I deferred auth, GSI2, and DLQ rather than shipping partial implementations.
+**Tier 1 (fully hardened):** create, get, update, audit — correctness guarantees everything else depends on.
+
+**Tier 2 (deliberately minimal):** list and version-checkpoint — prove the single-table access patterns end-to-end without committing to index shapes or checkpoint workflow rules before the real query patterns are known. See [Implementation depth — hardened core vs deliberately minimal](ARCHITECTURE.md#implementation-depth--hardened-core-vs-deliberately-minimal) in `ARCHITECTURE.md` for the full rationale.
+
+I deferred auth, GSI2, and DLQ rather than shipping partial implementations of those concerns.
 
 ---
 

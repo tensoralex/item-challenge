@@ -3,6 +3,7 @@
  *
  * Error-to-status mapping (used by all handlers via toErrorResponse):
  *   ZodError              → 400  { error: 'Validation failed', details }
+ *   InvalidCursorError    → 400  { error: 'Invalid cursor' }
  *   OptimisticLockError   → 409  { error: message }
  *   anything else         → 500  { error: 'Internal server error' }
  *
@@ -10,7 +11,7 @@
  */
 
 import { ZodError } from 'zod';
-import { OptimisticLockError } from '../storage/errors.js';
+import { InvalidCursorError, OptimisticLockError } from '../storage/errors.js';
 
 export interface HandlerResponse {
   statusCode: number;
@@ -28,6 +29,13 @@ export function toErrorResponse(err: unknown): HandlerResponse {
         error: 'Validation failed',
         details: err.issues,
       },
+    };
+  }
+
+  if (err instanceof InvalidCursorError) {
+    return {
+      statusCode: 400,
+      body: { error: 'Invalid cursor' },
     };
   }
 

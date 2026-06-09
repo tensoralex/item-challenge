@@ -191,6 +191,7 @@ flowchart LR
 | Condition | Status | Body |
 |-----------|--------|------|
 | `ZodError` | 400 | `{ error: 'Validation failed', details }` |
+| `InvalidCursorError` | 400 | `{ error: 'Invalid cursor' }` |
 | Malformed item id | 400 | `{ error: 'Invalid item id' }` |
 | Item not found | 404 | `{ error: 'Item not found' }` |
 | `OptimisticLockError` | 409 | `{ error: message }` |
@@ -202,13 +203,13 @@ The starter's path parsing treated `/audit` as an item id (`url.split('/').pop()
 
 ### Phased delivery
 
-I shipped correctness primitives (transactions, optimistic locking, audit invariants) first. List and checkpoint endpoints followed on the proven storage layer — see **List endpoint design** below. I deferred unfiltered listing and multi-filter queries.
+I shipped correctness primitives (transactions, optimistic locking, audit invariants) first. List and checkpoint endpoints followed on the proven storage layer — see **List endpoint design** below and the tier rationale in [ARCHITECTURE.md — Implementation depth](ARCHITECTURE.md#implementation-depth--hardened-core-vs-deliberately-minimal). I deferred unfiltered listing and multi-filter queries.
 
 ---
 
 ## List endpoint design (minimal implementation)
 
-**What I shipped:** subject-required GSI1 query with status filter, capped limit, opaque cursor, summary responses (no `content`). GSI1 uses `INCLUDE` projection. Additional index patterns depend on which UI access patterns dominate — see roadmap in [ARCHITECTURE.md](ARCHITECTURE.md).
+**What I shipped:** subject-required GSI1 query with status filter, capped limit, opaque cursor, summary responses (no `content`). GSI1 uses `INCLUDE` projection. This is **Tier 2** — implemented end-to-end but intentionally not extended; see the tier rationale and index roadmap in [ARCHITECTURE.md](ARCHITECTURE.md#implementation-depth--hardened-core-vs-deliberately-minimal).
 
 ```mermaid
 flowchart LR
@@ -358,10 +359,13 @@ The e2e harness uses `startServer(0)` from `server.ts` (ephemeral port), `vitest
 | 413 body cap ECONNRESET | `req.destroy()` mid-upload reset the socket; I drain the body, respond 413 with `Connection: close` |
 | Vitest picking up stale `dist/` tests | Added `dist/**` to `vitest.config.ts` exclude list |
 | 6/6 endpoints | `listItemsHandler` + `createVersionHandler` on existing storage; GSI1 INCLUDE projection |
-| Validation lifts | `itemIdSchema` (uuid), >=2 MC options, `listItemsQuerySchema` with coerced limit |
+| Validation hardening | `itemIdSchema` (uuid), >=2 MC options, `listItemsQuerySchema` with coerced limit |
 | ESLint 9 + Prettier | `eslint.config.js`, `pnpm lint`, `pnpm format` |
 | Sample payload | `samples/sample-item.json` wired into `demo.sh` |
 | Idempotent demo/setup | `ensure_server` OPTIONS 204 probe + curl retry; `05_create_local_table.sh` auto-heals GSI projection drift |
+| Malformed list cursor → 500 | `decodeDynamoCursor` validates shape; `InvalidCursorError` → 400 in `toErrorResponse` |
+| Audit trail truncated at 1 MB | `getAuditTrail` loops on `LastEvaluatedKey` until all VERSION rows are read |
+| Blanket `TransactionCanceledException` → 409 | `isOptimisticLockCancellation` inspects `CancellationReasons`; only `ConditionalCheckFailed` → `OptimisticLockError` |
 
 ---
 
