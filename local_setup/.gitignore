@@ -1,0 +1,11 @@
+# DynamoDB Local jar download and runtime artifacts (not committed)
+.dynamodb-local/
+
+# Process tracking for jar-based DynamoDB Local
+*.pid
+
+# Script logs
+*.log
+
+# Runtime mode marker (docker vs jar)
+.runtime-mode

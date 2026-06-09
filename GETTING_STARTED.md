@@ -1,5 +1,7 @@
 # Getting Started
 
+> **Note:** This is the original starter document, kept unchanged for reference. Parts of it no longer reflect my implemented solution (DynamoDB is now the default backend, `example.ts` was replaced by `src/handlers/items.ts`). For the current setup and run instructions, see [README.md](README.md) and [local_setup/LOCAL_SETUP.md](local_setup/LOCAL_SETUP.md); for design decisions, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Prerequisites
 
 - [Node 22+](https://nodejs.org)

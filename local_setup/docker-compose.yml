@@ -1,0 +1,15 @@
+# DynamoDB Local for the exam item management exercise — opt-in Docker runtime.
+# Used only when DDB_RUNTIME=docker (see 04_start_dynamodb_local.sh).
+# Default setup uses the Java jar (DDB_RUNTIME=jar, tested on macOS).
+#
+# Docs: https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html
+
+services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: item-challenge-ddb
+    ports:
+      - "8000:8000"
+    # -sharedDb: single database file regardless of region/credentials
+    # -inMemory: clean state on container restart (suitable for local review)
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]

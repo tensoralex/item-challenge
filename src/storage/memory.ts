@@ -1,19 +1,29 @@
 /**
- * In-Memory Storage Implementation
+ * In-Memory Storage — unit-test and zero-config fallback backend
  *
- * This is a simple in-memory storage for local development and testing.
- * Data is lost when the server restarts.
+ * I kept this for fast unit tests and zero-config fallback (USE_DYNAMODB=false).
+ * Primary development uses DynamoDB Local with single-table design (see dynamodb.ts).
+ *
+ * Limitations vs production storage:
+ * - Not single-table; separate in-process Maps for items and versions
+ * - Honors explicit expectedVersion on update (same contract as DynamoDB); no DynamoDB-style conditions
+ * - Data is lost when the process restarts
+ * - offset/limit pagination (not DynamoDB cursor semantics)
  */
 
 import { randomUUID } from 'crypto';
 import { ExamItem, CreateItemRequest, UpdateItemRequest, ListItemsQuery } from '../types/item.js';
+import { decodeOffsetCursor, encodeOffsetCursor } from '../lib/cursor.js';
+import { toItemSummary } from '../lib/mappers.js';
 import { ItemStorage } from './interface.js';
+import { OptimisticLockError } from './errors.js';
 
 export class MemoryStorage implements ItemStorage {
   private items: Map<string, ExamItem> = new Map();
   private versions: Map<string, ExamItem[]> = new Map();
 
   async createItem(data: CreateItemRequest): Promise<ExamItem> {
+    // Server-owned timestamps and version (same contract as DynamoDB storage).
     const now = Date.now();
     const item: ExamItem = {
       id: randomUUID(),
@@ -36,9 +46,17 @@ export class MemoryStorage implements ItemStorage {
     return this.items.get(id) || null;
   }
 
-  async updateItem(id: string, data: UpdateItemRequest): Promise<ExamItem | null> {
+  async updateItem(
+    id: string,
+    data: UpdateItemRequest,
+    expectedVersion?: number,
+  ): Promise<ExamItem | null> {
     const item = this.items.get(id);
     if (!item) return null;
+
+    if (expectedVersion !== undefined && item.metadata.version !== expectedVersion) {
+      throw new OptimisticLockError(id);
+    }
 
     const updated: ExamItem = {
       ...item,
@@ -62,27 +80,30 @@ export class MemoryStorage implements ItemStorage {
     return updated;
   }
 
-  async listItems(query: ListItemsQuery): Promise<{ items: ExamItem[]; total: number }> {
+  async listItems(query: ListItemsQuery) {
     let items = Array.from(this.items.values());
 
     // Filter by subject
     if (query.subject) {
-      items = items.filter(item => item.subject === query.subject);
+      items = items.filter((item) => item.subject === query.subject);
     }
 
     // Filter by status
     if (query.status) {
-      items = items.filter(item => item.metadata.status === query.status);
+      items = items.filter((item) => item.metadata.status === query.status);
     }
 
-    const total = items.length;
-
-    // Pagination
-    const offset = query.offset || 0;
+    const offset = query.cursor ? decodeOffsetCursor(query.cursor) : query.offset || 0;
     const limit = query.limit || 10;
-    items = items.slice(offset, offset + limit);
+    const page = items.slice(offset, offset + limit);
+    const nextOffset = offset + limit;
+    const summaries = page.map((item) => toItemSummary(item));
 
-    return { items, total };
+    return {
+      items: summaries,
+      count: summaries.length,
+      ...(nextOffset < items.length && { nextCursor: encodeOffsetCursor(nextOffset) }),
+    };
   }
 
   async createVersion(id: string): Promise<ExamItem | null> {

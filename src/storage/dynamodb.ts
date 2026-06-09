@@ -1,40 +1,50 @@
 /**
- * DynamoDB Storage Implementation (Optional)
+ * DynamoDB single-table storage for exam items.
  *
- * This implementation uses AWS DynamoDB for persistent storage.
+ * Table design (ExamItems):
+ *   PK = ITEM#<id>, SK = METADATA     — current item state
+ *   PK = ITEM#<id>, SK = VERSION#nnnnnn — immutable version snapshots (audit trail)
+ *   GSI1: GSI1PK = SUBJECT#<subject>, GSI1SK = <status>#<created> (METADATA rows only)
  *
- * To use this:
- * 1. Set environment variable: USE_DYNAMODB=true
- * 2. Configure AWS credentials (or use DynamoDB Local)
- * 3. Set DYNAMODB_TABLE_NAME (or use default "ExamItems")
- *
- * For DynamoDB Local:
- * - Download from: https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.html
- * - Run: java -Djava.library.path=./DynamoDBLocal_lib -jar DynamoDBLocal.jar -sharedDb
- * - Set DYNAMODB_ENDPOINT=http://localhost:8000
+ * Writes use TransactWriteItems so METADATA and VERSION rows stay consistent.
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
-  PutCommand,
   GetCommand,
-  UpdateCommand,
   ScanCommand,
-  QueryCommand
+  QueryCommand,
+  TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { randomUUID } from 'crypto';
 import { ExamItem, CreateItemRequest, UpdateItemRequest, ListItemsQuery } from '../types/item.js';
 import { ItemStorage } from './interface.js';
+import { METADATA_SK, VERSION_PREFIX, gsi1Pk, itemPk, versionSk } from '../lib/keys.js';
+import { decodeDynamoCursor, encodeDynamoCursor } from '../lib/cursor.js';
+import { toExamItem, toItemRecord, toItemSummary } from '../lib/mappers.js';
+import { OptimisticLockError } from './errors.js';
+
+export { OptimisticLockError };
 
 export class DynamoDBStorage implements ItemStorage {
   private client: DynamoDBDocumentClient;
   private tableName: string;
 
   constructor() {
+    const isLocal = !!process.env.DYNAMODB_ENDPOINT;
+
     const dynamoClient = new DynamoDBClient({
       region: process.env.AWS_REGION || 'us-east-1',
-      ...(process.env.DYNAMODB_ENDPOINT && { endpoint: process.env.DYNAMODB_ENDPOINT }),
+      ...(isLocal && {
+        endpoint: process.env.DYNAMODB_ENDPOINT,
+        // DynamoDB Local ignores credentials; provide dummies so the SDK's
+        // credential chain does not fail when no AWS profile is configured.
+        credentials: {
+          accessKeyId: process.env.AWS_ACCESS_KEY_ID || 'local',
+          secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || 'local',
+        },
+      }),
     });
 
     this.client = DynamoDBDocumentClient.from(dynamoClient);
@@ -54,27 +64,57 @@ export class DynamoDBStorage implements ItemStorage {
       },
     };
 
-    await this.client.send(new PutCommand({
-      TableName: this.tableName,
-      Item: item,
-    }));
+    const metadataRecord = toItemRecord(item, METADATA_SK);
+    const versionRecord = toItemRecord(item, versionSk(1));
+
+    // Atomic: current state + first audit snapshot must both succeed or neither.
+    await this.client.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: metadataRecord,
+              ConditionExpression: 'attribute_not_exists(SK)',
+            },
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: versionRecord,
+              ConditionExpression: 'attribute_not_exists(SK)',
+            },
+          },
+        ],
+      }),
+    );
 
     return item;
   }
 
   async getItem(id: string): Promise<ExamItem | null> {
-    const result = await this.client.send(new GetCommand({
-      TableName: this.tableName,
-      Key: { id },
-    }));
+    const result = await this.client.send(
+      new GetCommand({
+        TableName: this.tableName,
+        Key: { PK: itemPk(id), SK: METADATA_SK },
+      }),
+    );
 
-    return result.Item as ExamItem || null;
+    if (!result.Item) return null;
+    return toExamItem(result.Item as Record<string, unknown>);
   }
 
-  async updateItem(id: string, data: UpdateItemRequest): Promise<ExamItem | null> {
+  async updateItem(
+    id: string,
+    data: UpdateItemRequest,
+    expectedVersion?: number,
+  ): Promise<ExamItem | null> {
     const existing = await this.getItem(id);
     if (!existing) return null;
 
+    // Caller may supply the version they believe is current (HTTP: If-Match header on PUT).
+    const expected = expectedVersion ?? existing.metadata.version;
+    const newVersion = existing.metadata.version + 1;
     const updated: ExamItem = {
       ...existing,
       ...data,
@@ -83,39 +123,178 @@ export class DynamoDBStorage implements ItemStorage {
         ...existing.metadata,
         ...(data.metadata || {}),
         lastModified: Date.now(),
-        version: existing.metadata.version + 1,
+        version: newVersion,
       },
     };
 
-    await this.client.send(new PutCommand({
-      TableName: this.tableName,
-      Item: updated,
-    }));
+    const metadataRecord = toItemRecord(updated, METADATA_SK);
+    const snapshotRecord = toItemRecord(updated, versionSk(newVersion));
+
+    try {
+      await this.client.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: metadataRecord,
+                // Optimistic lock: reject if stored version != caller's expected version.
+                ConditionExpression: 'version = :expected',
+                ExpressionAttributeValues: { ':expected': expected },
+              },
+            },
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: snapshotRecord,
+                ConditionExpression: 'attribute_not_exists(SK)',
+              },
+            },
+          ],
+        }),
+      );
+    } catch (err: unknown) {
+      if (
+        err &&
+        typeof err === 'object' &&
+        'name' in err &&
+        (err as { name: string }).name === 'TransactionCanceledException'
+      ) {
+        throw new OptimisticLockError(id);
+      }
+      throw err;
+    }
 
     return updated;
   }
 
-  async listItems(query: ListItemsQuery): Promise<{ items: ExamItem[]; total: number }> {
-    // Note: This is a basic implementation using Scan
-    // For production, you should use Query with appropriate indexes
-    const result = await this.client.send(new ScanCommand({
-      TableName: this.tableName,
-      Limit: query.limit || 10,
-    }));
+  async listItems(query: ListItemsQuery) {
+    const limit = query.limit || 10;
 
-    const items = (result.Items || []) as ExamItem[];
-    return { items, total: result.Count || 0 };
+    // Prefer GSI1 query when filtering by subject (avoids full table Scan).
+    if (query.subject) {
+      const keyCondition = 'GSI1PK = :pk';
+      const values: Record<string, unknown> = { ':pk': gsi1Pk(query.subject) };
+      let filterExpression: string | undefined;
+
+      if (query.status) {
+        filterExpression = 'begins_with(GSI1SK, :statusPrefix)';
+        values[':statusPrefix'] = `${query.status}#`;
+      }
+
+      let exclusiveStartKey: Record<string, unknown> | undefined;
+      if (query.cursor) {
+        exclusiveStartKey = decodeDynamoCursor(query.cursor);
+      }
+
+      // Note: Limit is applied before FilterExpression — status-filtered pages may be short.
+      const result = await this.client.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          IndexName: 'GSI1',
+          KeyConditionExpression: keyCondition,
+          ...(filterExpression && { FilterExpression: filterExpression }),
+          ExpressionAttributeValues: values,
+          Limit: limit,
+          ...(exclusiveStartKey && { ExclusiveStartKey: exclusiveStartKey }),
+        }),
+      );
+
+      const items = (result.Items || []).map((row) =>
+        toItemSummary(row as Record<string, unknown>),
+      );
+      return {
+        items,
+        count: items.length,
+        ...(result.LastEvaluatedKey && {
+          nextCursor: encodeDynamoCursor(result.LastEvaluatedKey as Record<string, unknown>),
+        }),
+      };
+    }
+
+    // No subject filter: Scan METADATA rows only (acceptable for small local datasets).
+    // The API requires subject via listItemsQuerySchema — this branch is for direct storage use.
+    // Production would use a sparse GSI2 — see ARCHITECTURE.md.
+    const result = await this.client.send(
+      new ScanCommand({
+        TableName: this.tableName,
+        FilterExpression: 'SK = :meta',
+        ExpressionAttributeValues: { ':meta': METADATA_SK },
+        Limit: limit,
+      }),
+    );
+
+    const items = (result.Items || []).map((row) => toItemSummary(row as Record<string, unknown>));
+    return { items, count: items.length };
   }
 
   async createVersion(id: string): Promise<ExamItem | null> {
-    // TODO: Implement versioning strategy
-    // Options: Separate versions table, same table with sort key, etc.
-    throw new Error('Not implemented - define your versioning strategy');
+    const existing = await this.getItem(id);
+    if (!existing) return null;
+
+    const newVersion = existing.metadata.version + 1;
+    const versioned: ExamItem = {
+      ...existing,
+      metadata: {
+        ...existing.metadata,
+        version: newVersion,
+        lastModified: Date.now(),
+      },
+    };
+
+    const metadataRecord = toItemRecord(versioned, METADATA_SK);
+    const snapshotRecord = toItemRecord(versioned, versionSk(newVersion));
+
+    try {
+      await this.client.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: metadataRecord,
+                ConditionExpression: 'version = :expected',
+                ExpressionAttributeValues: { ':expected': existing.metadata.version },
+              },
+            },
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: snapshotRecord,
+                ConditionExpression: 'attribute_not_exists(SK)',
+              },
+            },
+          ],
+        }),
+      );
+    } catch (err: unknown) {
+      if (
+        err &&
+        typeof err === 'object' &&
+        'name' in err &&
+        (err as { name: string }).name === 'TransactionCanceledException'
+      ) {
+        throw new OptimisticLockError(id);
+      }
+      throw err;
+    }
+
+    return versioned;
   }
 
   async getAuditTrail(id: string): Promise<ExamItem[]> {
-    // TODO: Implement audit trail retrieval
-    // This depends on your versioning strategy
-    throw new Error('Not implemented - define your audit trail strategy');
+    const result = await this.client.send(
+      new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)',
+        ExpressionAttributeValues: {
+          ':pk': itemPk(id),
+          ':prefix': VERSION_PREFIX,
+        },
+        ScanIndexForward: true,
+      }),
+    );
+
+    return (result.Items || []).map((row) => toExamItem(row as Record<string, unknown>));
   }
 }

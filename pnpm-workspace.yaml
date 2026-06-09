@@ -1,0 +1,4 @@
+allowBuilds:
+  # esbuild requires its post-install script to download the platform-specific
+  # native binary. Without this, pnpm install exits ERR_PNPM_IGNORED_BUILDS.
+  esbuild: true

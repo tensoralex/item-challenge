@@ -1,25 +1,17 @@
 {
-    "subject": "AP Biology",
-    "itemType": "multiple-choice",
-    "difficulty": 3,
-    "content": {
-        "question": "What is photosynthesis?",
-        "options": [
-            "A",
-            "B",
-            "C",
-            "D"
-        ],
-        "correctAnswer": "A",
-        "explanation": "Photosynthesis is the process by which plants, algae, and some bacteria use sunlight to convert water and carbon dioxide into glucose and oxygen."
-    },
-    "metadata": {
-        "author": "test-author",
-        "status": "draft",
-        "tags": [
-            "biology",
-            "photosynthesis"
-        ]
-    },
-    "securityLevel": "standard"
+  "subject": "AP Biology",
+  "itemType": "multiple-choice",
+  "difficulty": 3,
+  "content": {
+    "question": "Which organelle is primarily responsible for ATP production?",
+    "options": ["Nucleus", "Mitochondria", "Ribosome", "Golgi apparatus"],
+    "correctAnswer": "Mitochondria",
+    "explanation": "Mitochondria carry out oxidative phosphorylation."
+  },
+  "metadata": {
+    "author": "panel-demo",
+    "status": "draft",
+    "tags": ["demo", "biology"]
+  },
+  "securityLevel": "standard"
 }

@@ -1,5 +1,8 @@
 /**
- * Exam Item Types
+ * Exam Item Types — domain model shared by handlers, storage, and validation.
+ *
+ * Server-owned fields (id, metadata.created, metadata.lastModified, metadata.version)
+ * are set by storage on create/update — clients cannot supply them (enforced by Zod).
  */
 
 export interface ExamItem {
@@ -46,8 +49,8 @@ export interface UpdateItemRequest {
   subject?: string;
   itemType?: string;
   difficulty?: number;
-  content?: Partial<ExamItem["content"]>;
-  metadata?: Partial<ExamItem["metadata"]>;
+  content?: Partial<ExamItem['content']>;
+  metadata?: Partial<ExamItem['metadata']>;
   securityLevel?: string;
 }
 
@@ -56,4 +59,15 @@ export interface ListItemsQuery {
   offset?: number;
   subject?: string;
   status?: string;
+  /** Opaque pagination cursor (base64url-encoded). */
+  cursor?: string;
+}
+
+/** List view — excludes content (answers never exposed in list responses). */
+export type ExamItemSummary = Omit<ExamItem, 'content'>;
+
+export interface ListItemsResult {
+  items: ExamItemSummary[];
+  count: number;
+  nextCursor?: string;
 }
