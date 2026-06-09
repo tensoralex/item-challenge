@@ -182,12 +182,13 @@ export class DynamoDBStorage implements ItemStorage {
 
     // Prefer GSI1 query when filtering by subject (avoids full table Scan).
     if (query.subject) {
-      const keyCondition = 'GSI1PK = :pk';
+      let keyCondition = 'GSI1PK = :pk';
       const values: Record<string, unknown> = { ':pk': gsi1Pk(query.subject) };
-      let filterExpression: string | undefined;
 
       if (query.status) {
-        filterExpression = 'begins_with(GSI1SK, :statusPrefix)';
+        // Status is the GSI1SK prefix (<status>#<created>) — key condition, not filter:
+        // pages are always full and unmatched rows are never read.
+        keyCondition += ' AND begins_with(GSI1SK, :statusPrefix)';
         values[':statusPrefix'] = `${query.status}#`;
       }
 
@@ -196,13 +197,11 @@ export class DynamoDBStorage implements ItemStorage {
         exclusiveStartKey = decodeDynamoCursor(query.cursor);
       }
 
-      // Note: Limit is applied before FilterExpression — status-filtered pages may be short.
       const result = await this.client.send(
         new QueryCommand({
           TableName: this.tableName,
           IndexName: 'GSI1',
           KeyConditionExpression: keyCondition,
-          ...(filterExpression && { FilterExpression: filterExpression }),
           ExpressionAttributeValues: values,
           Limit: limit,
           ...(exclusiveStartKey && { ExclusiveStartKey: exclusiveStartKey }),

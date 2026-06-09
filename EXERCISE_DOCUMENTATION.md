@@ -366,6 +366,7 @@ The e2e harness uses `startServer(0)` from `server.ts` (ephemeral port), `vitest
 | Malformed list cursor → 500 | `decodeDynamoCursor` validates shape; `InvalidCursorError` → 400 in `toErrorResponse` |
 | Audit trail truncated at 1 MB | `getAuditTrail` loops on `LastEvaluatedKey` until all VERSION rows are read |
 | Blanket `TransactionCanceledException` → 409 | `isOptimisticLockCancellation` inspects `CancellationReasons`; only `ConditionalCheckFailed` → `OptimisticLockError` |
+| Status filter as `FilterExpression` | Moved to `KeyConditionExpression` (`begins_with` on `GSI1SK`); full pages, no wasted RCUs |
 
 ---
 

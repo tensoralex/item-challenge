@@ -87,9 +87,7 @@ Concrete rows for one item after create, a `PUT` update, and a checkpoint (`POST
 
 ### List items: minimal implementation
 
-**What I shipped:** `GET /api/items?subject=<required>&status=&limit=&cursor=` — GSI1 query on `SUBJECT#<subject>`, optional `begins_with` on `GSI1SK` for status, capped `limit` (max 50), opaque base64url cursor from `LastEvaluatedKey`. Responses return **summaries** (no `content`) — GSI1 uses `INCLUDE` projection to reduce read cost and to ensure list views never expose answers.
-
-**Caveat:** DynamoDB applies `Limit` before `FilterExpression`; status-filtered pages may return fewer than `limit` items.
+**What I shipped:** `GET /api/items?subject=<required>&status=&limit=&cursor=` — GSI1 query on `SUBJECT#<subject>`, optional `begins_with` on `GSI1SK` for status (key condition, not filter), capped `limit` (max 50), opaque base64url cursor from `LastEvaluatedKey`. Status filtering uses the sort-key prefix so filtered pages are full pages with no wasted RCUs. Responses return **summaries** (no `content`) — GSI1 uses `INCLUDE` projection to reduce read cost and to ensure list views never expose answers.
 
 **Roadmap (not built):**
 
@@ -221,7 +219,6 @@ cd infrastructure && npx cdk synth -c env=prod                   # prod
 | Observation | Acceptable for this exercise | Production fix |
 |-------------|------------------------------|----------------|
 | List without subject | API requires `subject` (GSI1 access pattern) | GSI2 sharded recency for global list |
-| Status filter short pages | DynamoDB `Limit` before `FilterExpression` | Denormalize status into GSI sort key only (already done); accept short pages or over-fetch |
 | Offset pagination in memory backend | I kept in-memory for fast unit tests only; DDB list uses cursor | Cursor via `LastEvaluatedKey` |
 | Wildcard CORS on local server | Dev convenience | Environment-specific allowlist (prod CDK config) |
 | Module-level `createStorage()` singleton | Simple warm-Lambda reuse pattern | Per-request injection / factory in Lambda |
