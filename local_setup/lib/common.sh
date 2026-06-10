@@ -3,6 +3,9 @@
 
 set -euo pipefail
 
+# Disable AWS CLI pager so output goes directly to stdout during scripted setup.
+export AWS_PAGER=""
+
 # Resolve local_setup/ and repository root regardless of caller cwd.
 LOCAL_SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "${LOCAL_SETUP_DIR}/.." && pwd)"

@@ -51,7 +51,7 @@ start_with_docker() {
 }
 
 start_with_jar() {
-  if ! command_exists java; then
+  if ! command_exists java || ! java -version >/dev/null 2>&1; then
     log_error "Java 17+ is required for the default jar runtime (DDB_RUNTIME=jar)."
     exit 1
   fi

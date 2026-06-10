@@ -58,7 +58,11 @@ else
   MISSING_HARD=1
 fi
 
-report_tool "pnpm" "pnpm" "optional" || true
+if command_exists pnpm; then
+  log_ok "pnpm: $(pnpm --version)"
+else
+  log_info "pnpm: not found (will be installed automatically in next step)"
+fi
 report_tool "npm" "npm" "optional" || true
 report_tool "AWS CLI" "aws" "hard" || true
 
@@ -86,7 +90,7 @@ else
   fi
 fi
 
-if command_exists java; then
+if command_exists java && java -version >/dev/null 2>&1; then
   HAS_JAVA=1
   JAVA_VERSION="$(java -version 2>&1 | head -n 1)"
   log_ok "Java: ${JAVA_VERSION}"
